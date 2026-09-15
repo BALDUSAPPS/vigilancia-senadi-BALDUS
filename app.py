@@ -4,11 +4,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rapidfuzz import fuzz
 import easyocr
+import gc
 
 st.set_page_config(page_title="Vigilancia Marcaria SENADI", page_icon="🛡️", layout="wide")
 
 st.title("🛡️ Sistema de Vigilancia y Oposición de Marcas SENADI")
-st.caption("Procesamiento en flujo continuo paralelo (Nube alta velocidad)")
+st.caption("Procesamiento optimizado para la nube")
 
 uploaded_file = st.sidebar.file_uploader("1. Sube tu archivo Excel de marcas", type=["xlsx", "xls"])
 gaceta_num = st.sidebar.text_input("2. Número de Gaceta", placeholder="Ej. 762")
@@ -16,10 +17,9 @@ umbral_similitud = st.sidebar.slider("Umbral de Similitud (%)", min_value=50, ma
 
 btn_procesar = st.sidebar.button("Procesar Gaceta Completa", type="primary")
 
-# Cargar el motor de OCR UNA SOLA VEZ globalmente para evitar colapso de RAM
 @st.cache_resource
 def get_ocr_reader():
-    return easyocr.Reader(['es'], gpu=False)
+    return easyocr.Reader(['es'], gpu=False, quantize=True)
 
 def descargar_y_ocr(args):
     gaceta, page, df_excel, umbral, reader = args
@@ -27,10 +27,9 @@ def descargar_y_ocr(args):
     
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             image_bytes = resp.read()
         
-        # Procesar con el reader precargado
         text_results = reader.readtext(image_bytes, detail=0)
         texto_pagina = " ".join(text_results).upper()
         
@@ -67,10 +66,10 @@ if btn_procesar:
         df_excel = pd.read_excel(uploaded_file)
         df_excel['Denominacion_clean'] = df_excel['Denominacion'].astype(str).str.upper().str.strip()
         
-        st.info("Inicializando motor de Inteligencia Artificial...")
+        st.info("Cargando motor de lectura...")
         reader = get_ocr_reader()
         
-        st.info(f"Analizando Gaceta {gaceta_num} en tiempo real...")
+        st.info(f"Analizando Gaceta {gaceta_num}...")
         
         alertas_totales = []
         max_estimado = 1500
@@ -78,8 +77,7 @@ if btn_procesar:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Reducimos a 8 trabajadores para no sobrepasar el límite de RAM de la nube gratuita
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
                 executor.submit(descargar_y_ocr, (gaceta_num, p, df_excel, umbral_similitud, reader)): p 
                 for p in range(1, max_estimado)
@@ -102,6 +100,7 @@ if btn_procesar:
                 if paginas_procesadas % 10 == 0:
                     status_text.text(f"Procesadas {paginas_procesadas} páginas...")
                     progress_bar.progress(min(paginas_procesadas / 1000, 1.0))
+                    gc.collect()
                 
                 if errores_consecutivos > 15 and paginas_procesadas > 50:
                     executor.shutdown(wait=False, cancel_futures=True)
