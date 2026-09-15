@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import urllib.request
-import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rapidfuzz import fuzz
 import easyocr
@@ -17,12 +16,13 @@ umbral_similitud = st.sidebar.slider("Umbral de Similitud (%)", min_value=50, ma
 
 btn_procesar = st.sidebar.button("Procesar Gaceta Completa", type="primary")
 
+# Cargar el motor de OCR UNA SOLA VEZ globalmente para evitar colapso de RAM
 @st.cache_resource
-def load_ocr():
+def get_ocr_reader():
     return easyocr.Reader(['es'], gpu=False)
 
 def descargar_y_ocr(args):
-    gaceta, page, df_excel, umbral = args
+    gaceta, page, df_excel, umbral, reader = args
     url = f"http://gaceta.propiedadintelectual.gob.ec:8180/Gacetas/{gaceta}/files/page/{page}.jpg"
     
     try:
@@ -30,7 +30,7 @@ def descargar_y_ocr(args):
         with urllib.request.urlopen(req, timeout=5) as resp:
             image_bytes = resp.read()
         
-        reader = load_ocr()
+        # Procesar con el reader precargado
         text_results = reader.readtext(image_bytes, detail=0)
         texto_pagina = " ".join(text_results).upper()
         
@@ -67,7 +67,10 @@ if btn_procesar:
         df_excel = pd.read_excel(uploaded_file)
         df_excel['Denominacion_clean'] = df_excel['Denominacion'].astype(str).str.upper().str.strip()
         
-        st.info(f"Analizando Gaceta {gaceta_num} con motor en paralelo de alta velocidad...")
+        st.info("Inicializando motor de Inteligencia Artificial...")
+        reader = get_ocr_reader()
+        
+        st.info(f"Analizando Gaceta {gaceta_num} en tiempo real...")
         
         alertas_totales = []
         max_estimado = 1500
@@ -75,9 +78,10 @@ if btn_procesar:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        # Reducimos a 8 trabajadores para no sobrepasar el límite de RAM de la nube gratuita
+        with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {
-                executor.submit(descargar_y_ocr, (gaceta_num, p, df_excel, umbral_similitud)): p 
+                executor.submit(descargar_y_ocr, (gaceta_num, p, df_excel, umbral_similitud, reader)): p 
                 for p in range(1, max_estimado)
             }
             
@@ -96,23 +100,23 @@ if btn_procesar:
                 paginas_procesadas += 1
                 
                 if paginas_procesadas % 10 == 0:
-                    status_text.text(f"Procesadas {paginas_procesadas} páginas en tiempo real...")
+                    status_text.text(f"Procesadas {paginas_procesadas} páginas...")
                     progress_bar.progress(min(paginas_procesadas / 1000, 1.0))
                 
                 if errores_consecutivos > 15 and paginas_procesadas > 50:
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
-        status_text.success("¡Cotejo de Gaceta completado con éxito!")
+        status_text.success("¡Cotejo completado con éxito!")
         progress_bar.progress(100)
         
         if alertas_totales:
             df_alertas = pd.DataFrame(alertas_totales).drop_duplicates(subset=["Página Gaceta", "Tu Marca Registrada"])
-            st.warning(f"⚠️ Se detectaron {len(df_alertas)} posibles conflictos para oposición:")
+            st.warning(f"⚠️ Se detectaron {len(df_alertas)} posibles conflictos:")
             st.dataframe(df_alertas, use_container_width=True)
             
             csv = df_alertas.to_csv(index=False).encode('utf-8')
-            st.download_button("⬇️ Descargar Reporte de Alertas (CSV)", csv, f"Alertas_Gaceta_{gaceta_num}.csv", "text/csv")
+            st.download_button("⬇️ Descargar Reporte (CSV)", csv, f"Alertas_Gaceta_{gaceta_num}.csv", "text/csv")
         else:
             st.balloons()
             st.success("No se detectaron marcas parecidas en esta Gaceta.")
